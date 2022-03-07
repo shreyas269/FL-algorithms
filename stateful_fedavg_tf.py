@@ -1,4 +1,17 @@
-"""An implementation of the Scaffold algorithm with stateful clients.
+# Copyright 2020, The TensorFlow Federated Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""An implementation of the FedAvg algorithm with stateful clients.
 
 The TF functions for sever and client udpates.
 """
@@ -92,7 +105,6 @@ class ClientState(object):
   """
   client_index = attr.ib()
   iters_count = attr.ib()
-  client_controls = attr.ib()
 
 
 @attr.s(eq=False, frozen=True, slots=True)
@@ -129,7 +141,6 @@ class ServerState(object):
   optimizer_state = attr.ib()
   round_num = attr.ib()
   total_iters_count = attr.ib()
-  server_controls = attr.ib()
 
 
 @attr.s(eq=False, frozen=True, slots=True)
@@ -145,12 +156,11 @@ class BroadcastMessage(object):
   """
   model_weights = attr.ib()
   round_num = attr.ib()
-  server_controls = attr.ib()
 
 
 @tf.function
 def server_update(model, server_optimizer, server_state, weights_delta,
-                  total_iters_count, round_client_controls):
+                  total_iters_count):
   """Updates `server_state` based on `weights_delta`.
 
   Args:
@@ -183,8 +193,7 @@ def server_update(model, server_optimizer, server_state, weights_delta,
       model_weights=model_weights,
       optimizer_state=server_optimizer.variables(),
       round_num=server_state.round_num + 1,
-      total_iters_count=total_iters_count,
-      server_controls=round_client_controls)
+      total_iters_count=total_iters_count)
 
 
 @tf.function
@@ -203,8 +212,7 @@ def build_server_broadcast_message(server_state):
   """
   return BroadcastMessage(
       model_weights=server_state.model_weights,
-      round_num=server_state.round_num,
-      server_controls=server_state.server_controls)
+      round_num=server_state.round_num)
 
 
 @tf.function
@@ -224,8 +232,6 @@ def client_update(model, dataset, client_state, server_message,
   """
   model_weights = get_model_weights(model)
   initial_weights = server_message.model_weights
-  server_controls = server_message.server_controls
-  client_controls = client_state.client_controls
   tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
                         initial_weights)
 
@@ -242,28 +248,12 @@ def client_update(model, dataset, client_state, server_message,
     loss_sum += outputs.loss * tf.cast(batch_size, tf.float32)
     iters_count += 1
 
-  # Update model weights further using client and server controls
-  model_weights = tf.nest.map_structure(lambda a, b, c: a - 0.05*(b - c),
-                                        model_weights,
-                                        server_controls,
-                                        client_controls)
-
   weights_delta = tf.nest.map_structure(lambda a, b: a - b,
                                         model_weights.trainable,
                                         initial_weights.trainable)
 
-
   client_weight = tf.cast(num_examples, tf.float32)
-
-  # Update client controls
-  client_controls = tf.nest.map_structure(lambda a, b, c, d: a - b + (1/0.05)*(c - d),
-                                        client_controls,
-                                        server_controls,
-                                        initial_weights,
-                                        model_weights)
-
-
   return ClientOutput(
       weights_delta, client_weight, loss_sum / client_weight,
       ClientState(
-          client_index=client_state.client_index, iters_count=iters_count, client_controls=client_controls))
+          client_index=client_state.client_index, iters_count=iters_count))

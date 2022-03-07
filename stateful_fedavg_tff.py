@@ -1,15 +1,39 @@
-import collections
-import functools
-from typing import Callable, List, OrderedDict
-import numpy as np
+# Copyright 2020, The TensorFlow Federated Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""An implementation of the Federated Averaging algorithm.
+
+This is intended to be a minimal stand-alone implementation of Federated
+Averaging, suitable for branching as a starting point for algorithm
+modifications; see `tff.learning.build_federated_averaging_process` for a
+more full-featured implementation.
+
+Based on the paper:
+
+Communication-Efficient Learning of Deep Networks from Decentralized Data
+    H. Brendan McMahan, Eider Moore, Daniel Ramage,
+    Seth Hampson, Blaise Aguera y Arcas. AISTATS 2017.
+    https://arxiv.org/abs/1602.05629
+"""
+
 import tensorflow as tf
 import tensorflow_federated as tff
-import scaffold_tf
-from scaffold_tf import build_server_broadcast_message
-from scaffold_tf import client_update
-from scaffold_tf import get_model_weights
-from scaffold_tf import server_update
-from scaffold_tf import ServerState
+
+from stateful_fedavg_tf import build_server_broadcast_message
+from stateful_fedavg_tf import client_update
+from stateful_fedavg_tf import get_model_weights
+from stateful_fedavg_tf import server_update
+from stateful_fedavg_tf import ServerState
 
 
 def _initialize_optimizer_vars(model, optimizer):
@@ -35,7 +59,7 @@ def build_federated_averaging_process(
   Args:
     model_fn: A no-arg function that returns a `tff.learning.TrainableModel`.
     client_state_fn: A no-arg function that returns a
-      `scaffold_tf.ClientState`.
+      `stateful_fedavg_tf.ClientState`.
     server_optimizer_fn: A no-arg function that returns a
       `tf.keras.optimizers.Optimizer` for server update.
     client_optimizer_fn: A no-arg function that returns a
@@ -56,8 +80,7 @@ def build_federated_averaging_process(
         model_weights=get_model_weights(model),
         optimizer_state=server_optimizer.variables(),
         round_num=0,
-        total_iters_count=0,
-        server_controls=get_model_weights(model))
+        total_iters_count=0)
 
   server_state_type = server_init_tf.type_signature.result
 
@@ -66,13 +89,13 @@ def build_federated_averaging_process(
   client_state_type = tff.framework.type_from_tensors(client_state_fn())
 
   @tff.tf_computation(server_state_type, model_weights_type.trainable,
-                      client_state_type.iters_count, client_state_type.client_controls)  # pytype: disable=attribute-error  # gen-stub-imports
-  def server_update_fn(server_state, model_delta, total_iters_count, round_client_controls):
+                      client_state_type.iters_count)  # pytype: disable=attribute-error  # gen-stub-imports
+  def server_update_fn(server_state, model_delta, total_iters_count):
     model = model_fn()
     server_optimizer = server_optimizer_fn()
     _initialize_optimizer_vars(model, server_optimizer)
     return server_update(model, server_optimizer, server_state, model_delta,
-                         total_iters_count, round_client_controls)
+                         total_iters_count)
 
   @tff.tf_computation(server_state_type)
   def server_message_fn(server_state):
@@ -100,10 +123,10 @@ def build_federated_averaging_process(
     """Orchestration logic for one round of computation.
 
     Args:
-      server_state: A `scaffold_tf.ServerState`.
+      server_state: A `stateful_fedavg_tf.ServerState`.
       federated_dataset: A federated `tf.data.Dataset` with placement
         `tff.CLIENTS`.
-      client_states: A federated `scaffold_tf.ClientState`.
+      client_states: A federated `stateful_fedavg_tf.ClientState`.
 
     Returns:
       A tuple of updated `ServerState` and `tf.Tensor` of average loss.
@@ -118,15 +141,10 @@ def build_federated_averaging_process(
     weight_denom = client_outputs.client_weight
     round_model_delta = tff.federated_mean(
         client_outputs.weights_delta, weight=weight_denom)
-
-    round_client_controls = tff.federated_mean(
-        client_outputs.client_state.client_controls, weight=weight_denom)
-
     total_iters_count = tff.federated_sum(
         client_outputs.client_state.iters_count)
-
     server_state = tff.federated_map(
-        server_update_fn, (server_state, round_model_delta, total_iters_count, round_client_controls))
+        server_update_fn, (server_state, round_model_delta, total_iters_count))
     round_loss_metric = tff.federated_mean(
         client_outputs.model_output, weight=weight_denom)
 
