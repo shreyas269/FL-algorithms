@@ -228,10 +228,12 @@ class CreateClientUpdateFn():
 
     optimizer_output = collections.OrderedDict([('num_examples', num_examples)])
 
+    loss = loss_sum / client_weight
+    
     return ClientOutput(
         weights_delta=weights_delta,
         client_weight=client_weight,
-        model_output=loss_sum / client_weight,
+        model_output=model.report_local_unfinalized_metrics(),
         optimizer_output=optimizer_output)
 
 
@@ -297,6 +299,12 @@ def build_federated_averaging_process(model_fn,
   Returns:
     A `tff.templates.IterativeProcess`.
   """
+
+  whimsy_model = model_fn()
+  unfinalized_metrics_type = tff.framework.type_from_tensors(
+      whimsy_model.report_local_unfinalized_metrics())
+  metrics_aggregation_computation = tff.learning.metrics.sum_then_finalize(
+      whimsy_model.metric_finalizers(), unfinalized_metrics_type)
 
   base_lr_schedule = base_lr
   if not callable(base_lr_schedule):
@@ -379,10 +387,10 @@ def build_federated_averaging_process(model_fn,
     server_state = tff.federated_map(server_update_fn,
                                      (server_state, model_delta))
 
-    round_loss_metric = tff.federated_mean(
-        client_outputs.model_output, weight=weight_denom)
+    aggregated_outputs = metrics_aggregation_computation(
+        client_outputs.model_output)
 
-    return server_state, round_loss_metric
+    return server_state, aggregated_outputs
 
   @tff.federated_computation
   def server_init_tff():
