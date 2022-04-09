@@ -197,7 +197,10 @@ class CreateClientUpdateFn():
     """
 
     model_weights = _get_weights(model)
+    initial_model_weights = _get_weights(model)
     tf.nest.map_structure(lambda v, t: v.assign(t), model_weights,
+                          initial_weights)
+    tf.nest.map_structure(lambda v, t: v.assign(t), initial_model_weights,
                           initial_weights)
 
     # Compute gradient over full data at initial_weights.
@@ -226,8 +229,13 @@ class CreateClientUpdateFn():
       with tf.GradientTape() as tape:
         output = model.forward_pass(batch)
       grads = tape.gradient(output.loss, model_weights.trainable)
+
+      with tf.GradientTape() as tape:
+        output = model.forward_pass(batch)
+      initial_grads = tape.gradient(output.loss, initial_model_weights.trainable)
+
       tf.nest.map_structure(lambda v, t: v.assign_add(t), self.grad_sum,
-                            grads)
+                            initial_grads)
       grads_and_vars = zip(grads, model_weights.trainable)
       optimizer.apply_gradients(grads_and_vars)
       if hasattr(output, 'num_examples'):
