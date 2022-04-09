@@ -89,6 +89,7 @@ class CreateServerUpdateFn():
                     optimizer,
                     server_state,
                     weights_delta,
+                    full_grad,
                     server_learning_rate=1.0):
     """Updates `server_state` based on `weights_delta`, increase the round number.
 
@@ -119,10 +120,21 @@ class CreateServerUpdateFn():
     tf.nest.map_structure(lambda v, t: v.assign(t), model_weights.trainable,
                           new_weights)
 
+    # Server optimizer variables must be initialized prior to invoking this
+    optimizer_state = _get_optimizer_state(optimizer)
+    tf.nest.map_structure(lambda v, t: v.assign(t), optimizer_state,
+                          server_state.optimizer_state)
+
+    # Apply the update to the model. This is only to update the state of
+    # the optimizer.
+    grads_and_vars = zip(full_grad, model_weights.trainable)
+    optimizer.apply_gradients(grads_and_vars)
+
     # Create a new state based on the updated model.
     return tff.structure.update_struct(
         server_state,
         model=model_weights,
+        optimizer_state=optimizer_state,
         round_num=server_state.round_num)
 
 
@@ -143,6 +155,7 @@ class ClientOutput(object):
   client_weight = attr.ib()
   model_output = attr.ib()
   optimizer_output = attr.ib()
+  full_grad = attr.ib()
 
 
 class CreateClientUpdateFn():
@@ -196,15 +209,25 @@ class CreateClientUpdateFn():
     # Client optimizer variables must be initialized prior to invoking this
     optimizer_state = _get_optimizer_state(optimizer)
 
+    if self.grad_sum is None:
+      self.grad_sum = tf.nest.map_structure(
+          lambda x: tf.Variable(tf.zeros_like(x)), model_weights.trainable)
+    tf.nest.map_structure(
+        lambda v, t: v.assign(t), self.grad_sum,
+        tf.nest.map_structure(tf.zeros_like, model_weights.trainable))
+
     num_examples = tf.constant(0, dtype=tf.int32)
 
     for batch in iter(dataset):
+      num_batches += 1.0
       # keep optimizer state fixed to initial values.
       tf.nest.map_structure(lambda v, t: v.assign(t), optimizer_state,
                             initial_optimizer_state)
       with tf.GradientTape() as tape:
         output = model.forward_pass(batch)
       grads = tape.gradient(output.loss, model_weights.trainable)
+      tf.nest.map_structure(lambda v, t: v.assign_add(t), self.grad_sum,
+                            grads)
       grads_and_vars = zip(grads, model_weights.trainable)
       optimizer.apply_gradients(grads_and_vars)
       if hasattr(output, 'num_examples'):
@@ -229,12 +252,20 @@ class CreateClientUpdateFn():
     optimizer_output = collections.OrderedDict([('num_examples', num_examples)])
 
     loss = loss_sum / client_weight
-    
+
+    if num_batches > 0.0:
+      full_grad = tf.nest.map_structure(lambda a: a / num_batches,
+                                        self.grad_sum)
+    else:
+      # In case a client dataset is empty, just return an all 0s full gradient.
+      full_grad = tf.nest.map_structure(tf.zeros_like, model_weights.trainable)
+
     return ClientOutput(
         weights_delta=weights_delta,
         client_weight=client_weight,
         model_output=model.report_local_unfinalized_metrics(),
-        optimizer_output=optimizer_output)
+        optimizer_output=optimizer_output,
+        full_grad=full_grad)
 
 
 def build_server_init_fn(model_fn, optimizer_fn, base_lr, server_momentum):
@@ -344,8 +375,8 @@ def build_federated_averaging_process(model_fn,
     return client_update(model, tf_dataset, initial_model_weights,
                          initial_optimizer_state, optimizer, client_weight_fn)
 
-  @tff.tf_computation(server_state_type, model_weights_type.trainable)
-  def server_update_fn(server_state, model_delta):
+  @tff.tf_computation(server_state_type, model_weights_type.trainable, model_weights_type.trainable)
+  def server_update_fn(server_state, model_delta, full_grad):
     model = model_fn()
     server_lr = server_lr_schedule(server_state.round_num)
     base_lr = base_lr_schedule(server_state.round_num)
@@ -354,7 +385,7 @@ def build_federated_averaging_process(model_fn,
     # within the scope of the tf.function server_update.
     _initialize_optimizer_vars(model, optimizer)
     server_update = CreateServerUpdateFn()
-    return server_update(model, optimizer, server_state, model_delta,
+    return server_update(model, optimizer, server_state, model_delta, full_grad,
                          server_lr)
 
 
@@ -384,8 +415,11 @@ def build_federated_averaging_process(model_fn,
     model_delta = tff.federated_mean(
         client_outputs.weights_delta)
 
+    full_grad = tff.federated_mean(
+        client_outputs.full_grad)
+
     server_state = tff.federated_map(server_update_fn,
-                                     (server_state, model_delta))
+                                     (server_state, model_delta, full_grad))
 
     aggregated_outputs = metrics_aggregation_computation(
         client_outputs.model_output)
