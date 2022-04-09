@@ -317,7 +317,7 @@ def build_federated_averaging_process(model_fn,
   dummy_model = model_fn()
 
 
-  server_init_tf = build_server_init_fn(model_fn, optimizer_fn, server_lr, server_momentum)
+  server_init_tf = build_server_init_fn(model_fn, optimizer_fn, base_lr, server_momentum)
   server_state_type = server_init_tf.type_signature.result
   model_weights_type = server_state_type.model
   optimizer_state_type = server_state_type.optimizer_state
